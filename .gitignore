@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+backend/venv/
+backend/declutter.db
+*.db
+
+# Node
+desktop/node_modules/
+desktop/dist/
+desktop/dist-electron/
+
+# Env
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
