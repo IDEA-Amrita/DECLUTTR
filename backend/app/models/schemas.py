@@ -1,7 +1,7 @@
 from typing import Optional
 from sqlmodel import SQLModel, Field
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def new_id() -> str:
@@ -38,7 +38,7 @@ class ProtectedRule(SQLModel, table=True):
     type: str  # folder|path
     value: str
     label: str
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class WeeklySnapshot(SQLModel, table=True):
