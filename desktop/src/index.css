@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #0D0D0F; color: #F2F2F3; font-family: 'DM Mono', monospace; }
