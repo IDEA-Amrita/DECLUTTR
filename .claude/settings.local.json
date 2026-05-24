@@ -4,7 +4,21 @@
       "WebSearch",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(python -m venv venv)",
+      "Bash(.\\\\venv\\\\Scripts\\\\pip install *)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(venv/Scripts/pytest tests/test_health.py -v)",
+      "Bash(venv/Scripts/pytest tests/test_consent.py -v)",
+      "Bash(venv/Scripts/pytest tests/test_storage.py::test_walk_directory_returns_metadata tests/test_storage.py::test_find_exact_duplicates tests/test_storage.py::test_find_large_files tests/test_storage.py::test_find_old_files tests/test_storage.py::test_find_screenshots -v)",
+      "Bash(venv/Scripts/pytest tests/test_storage.py -v)",
+      "Bash(venv/Scripts/pytest tests/test_protected.py -v)",
+      "Bash(venv/Scripts/pytest tests/test_photos.py -v)",
+      "Bash(venv/Scripts/pytest tests/ -v)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Read(//tmp/**)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }
