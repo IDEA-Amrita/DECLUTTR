@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import {
   FolderOpen, Loader2, Trash2, SkipForward, ShieldCheck,
   ChevronDown, ChevronRight, Camera, Copy, HardDrive, Clock, FileImage,
 } from 'lucide-react'
 import { useScan } from '../hooks/useScan'
+import { useScanStore } from '../store/scanStore'
 import { useConsent } from '../hooks/useConsent'
 import { SuggestionCard, TYPE_LABELS, TYPE_COLORS, fmt } from '../components/SuggestionCard'
 import { ConsentModal } from '../components/ConsentModal'
@@ -187,19 +188,12 @@ function FileGroup({
 // ─── StoragePage ──────────────────────────────────────────────────────────────
 
 export function StoragePage() {
-  const { status, progress, suggestions: rawSuggestions, startScan, error } = useScan()
-  const [suggestions, setSuggestions] = useState<FileSuggestion[]>([])
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const { status, progress, startScan, error } = useScan()
+  // suggestions + selectedIds live in the global store so they survive
+  // navigation to other pages and back
+  const { suggestions, selectedIds, setSuggestions, setSelectedIds } = useScanStore()
   const [modalItems, setModalItems] = useState<FileSuggestion[]>([])
   const { confirm, skip } = useConsent(setSuggestions)
-
-  // Sync rawSuggestions → local state when scan completes
-  useEffect(() => {
-    if (rawSuggestions.length > 0) {
-      setSuggestions(rawSuggestions)
-      setSelectedIds(new Set())
-    }
-  }, [rawSuggestions])
 
   // ── Native directory picker ──
   const pickDir = async () => {
@@ -207,8 +201,7 @@ export function StoragePage() {
       ? await window.electron.openDirectory()
       : prompt('Enter directory path:')
     if (dir) {
-      setSuggestions([])
-      setSelectedIds(new Set())
+      // store.startScan already clears suggestions + selectedIds
       startScan(dir)
     }
   }
@@ -405,7 +398,7 @@ export function StoragePage() {
 
           {/* Skip all */}
           <button
-            onClick={() => { setSuggestions([]); setSelectedIds(new Set()) }}
+            onClick={() => { setSuggestions([]); setSelectedIds(new Set<string>()) }}
             className="text-xs font-mono px-3 py-1.5 rounded-lg"
             style={{ background: '#2A2A2E', color: '#8A8A96' }}
           >
