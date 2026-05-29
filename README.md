@@ -71,15 +71,15 @@ cp .env.example .env
 # Open .env and paste your keys
 ```
 
-| Env variable | Provider | Get key at |
-|---|---|---|---|
-| `GROQ_API_KEY` | Groq (llama-3.3-70b) | https://console.groq.com/keys |
-| `GOOGLE_API_KEY` | Gemini 2.0 Flash + 1.5 Flash | https://aistudio.google.com/app/apikey |
-| `MISTRAL_API_KEY` | Mistral Small | https://console.mistral.ai/api-keys |
-| `DEEPSEEK_API_KEY` | DeepSeek Chat | https://platform.deepseek.com/api-keys |
-| `COHERE_API_KEY` | Command-R+ | https://dashboard.cohere.com/api-keys |
-| `ANTHROPIC_API_KEY` | Claude Haiku + Sonnet | https://console.anthropic.com/settings/keys |
-| `OPENAI_API_KEY` | GPT-4o Mini + GPT-4o | https://platform.openai.com/api-keys |
+| Env Variable        | Provider                         | Get Key At                                        |
+|---------------------|----------------------------------|---------------------------------------------------|
+| `GROQ_API_KEY`      | Groq (Llama 3.3 70B)            | https://console.groq.com/keys                    |
+| `GOOGLE_API_KEY`    | Gemini 2.0 Flash + 1.5 Flash    | https://aistudio.google.com/app/apikey           |
+| `MISTRAL_API_KEY`   | Mistral Small                   | https://console.mistral.ai/api-keys              |
+| `DEEPSEEK_API_KEY`  | DeepSeek Chat                   | https://platform.deepseek.com/api-keys           |
+| `COHERE_API_KEY`    | Command-R+                      | https://dashboard.cohere.com/api-keys            |
+| `ANTHROPIC_API_KEY` | Claude Haiku + Sonnet           | https://console.anthropic.com/settings/keys      |
+| `OPENAI_API_KEY`    | GPT-4o Mini + GPT-4o            | https://platform.openai.com/api-keys             |
 
 You only need **one key** to get AI reasons. Start with Groq or Google bcoz both have free tiers.
 
