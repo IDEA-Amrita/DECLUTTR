@@ -18,7 +18,22 @@
       "Bash(npm install *)",
       "Bash(npm run *)",
       "Read(//tmp/**)",
-      "mcp__Claude_Preview__preview_start"
+      "mcp__Claude_Preview__preview_start",
+      "Read(//c/Dev//**)",
+      "Read(//c/Users/shree/**)",
+      "Bash(/c/Dev/declutter_AI/backend/venv/Scripts/python -c \"import groq, openai, mistralai, cohere; import google.generativeai; print\\('All providers importable'\\)\")",
+      "Bash(/c/Dev/declutter_AI/backend/venv/Scripts/pip install *)",
+      "Bash(/c/Dev/declutter_AI/backend/venv/Scripts/python -c \"from mistralai.client import Mistral; print\\('ok'\\)\")",
+      "Bash(venv/Scripts/python -m pytest tests/ -v)",
+      "Bash(npx vite *)",
+      "Bash(venv/Scripts/python -c \"from app.main import app; print\\('backend imports OK'\\)\")",
+      "Bash(curl -s --max-time 2 http://localhost:8000/api/health)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(curl -s --connect-timeout 2 http://localhost:8000/api/health)",
+      "Bash(curl -v --connect-timeout 2 http://127.0.0.1:8000/api/health)",
+      "Bash(venv/Scripts/python run.py)",
+      "Bash(curl -s http://127.0.0.1:8000/api/health)",
+      "Bash(npx tsc *)"
     ]
   }
 }
