@@ -1,14 +1,16 @@
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Home, HardDrive, Image, BarChart2 } from 'lucide-react'
+import { Home, HardDrive, Image, BarChart2, Cloud } from 'lucide-react'
 import { Dashboard } from './pages/Dashboard'
 import { StoragePage } from './pages/StoragePage'
 import { PhotoPickerPage } from './pages/PhotoPickerPage'
 import { ReportPage } from './pages/ReportPage'
+import GDrivePage from './pages/GDrivePage'
 
 const navItems = [
   { to: '/',        icon: Home,      label: 'Home'    },
   { to: '/storage', icon: HardDrive, label: 'Storage' },
   { to: '/photos',  icon: Image,     label: 'Photos'  },
+  { to: '/gdrive',  icon: Cloud,     label: 'Drive'   },  // ← add this
   { to: '/report',  icon: BarChart2, label: 'Report'  },
 ]
 
@@ -47,6 +49,7 @@ export default function App() {
             <Route path="/"        element={<Dashboard />} />
             <Route path="/storage" element={<StoragePage />} />
             <Route path="/photos"  element={<PhotoPickerPage />} />
+            <Route path="/gdrive" element={<GDrivePage />} />
             <Route path="/report"  element={<ReportPage />} />
           </Routes>
         </main>

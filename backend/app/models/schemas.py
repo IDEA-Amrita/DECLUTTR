@@ -2,7 +2,9 @@ from typing import Optional
 from sqlmodel import SQLModel, Field
 import uuid
 from datetime import datetime, timezone
-
+from app.models.gdrive_schemas import (
+DriveToken, DriveScanJob, DriveFileRecord, DriveFolderRule
+)
 
 def new_id() -> str:
     return str(uuid.uuid4())

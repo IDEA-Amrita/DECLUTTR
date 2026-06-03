@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import path from 'path'
 
 const isDev = process.env.NODE_ENV !== 'production'
@@ -34,4 +34,7 @@ app.on('window-all-closed', () => {
 ipcMain.handle('dialog:openDirectory', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
   return result.filePaths[0] ?? null
+})
+ipcMain.handle('shell:openExternal', (_event, url: string) => {
+  shell.openExternal(url)
 })
