@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
@@ -24,6 +25,9 @@ FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 BACKEND_ORIGIN  = os.getenv("BACKEND_ORIGIN",  "http://localhost:8000")
 REDIRECT_URI    = f"{BACKEND_ORIGIN}/api/gdrive/auth/callback"
 
+# In-memory store for flow state (state -> flow object)
+_flow_store = {}
+
 
 def _build_flow() -> Flow:
     client_config = {
@@ -35,12 +39,11 @@ def _build_flow() -> Flow:
             "redirect_uris": [REDIRECT_URI],
         }
     }
-    # Create flow without PKCE (we have client_secret, so PKCE not needed)
-    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
-    # Disable PKCE by removing code_challenge_method
-    if hasattr(flow, 'code_challenge_method'):
-        flow.code_challenge_method = None
-    return flow
+    return Flow.from_client_config(
+        client_config, 
+        scopes=SCOPES, 
+        redirect_uri=REDIRECT_URI,
+    )
 
 
 def _get_token(db: Session) -> DriveToken:
@@ -67,49 +70,74 @@ def _build_service(token: DriveToken):
 
 @router.get("/auth/url")
 def get_auth_url():
-    """Generate OAuth URL."""
+    """Generate OAuth URL and store flow in memory keyed by state."""
     flow = _build_flow()
-
     auth_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         include_granted_scopes="true"
     )
     
+    # Store the flow keyed by state for later retrieval on callback
+    _flow_store[state] = flow
+    logger.info(f"Generated auth URL for state: {state}")
+    
     return {"auth_url": auth_url}
 
 
 @router.get("/auth/callback")
-def oauth_callback(code: str = Query(...), db: Session = Depends(get_session)):
-    """OAuth callback."""
-    flow = _build_flow()
+def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session = Depends(get_session)):
+    """OAuth callback. Retrieves stored flow and exchanges code for token."""
+    
+    # Retrieve the flow that was stored in get_auth_url
+    if state not in _flow_store:
+        logger.error(f"State {state} not found in flow store. Available states: {list(_flow_store.keys())}")
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=invalid_state")
+    
+    flow = _flow_store.pop(state)  # Remove after retrieval
     
     try:
+        logger.info(f"Exchanging authorization code for token (state={state})")
         flow.fetch_token(code=code)
+        logger.info(f"Successfully fetched token")
     except Exception as e:
-        logger.error(f"OAuth token fetch failed: {e}")
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=oauth_failed")
+        logger.error(f"Token fetch failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=token_fetch_failed")
     
     creds: Credentials = flow.credentials
 
-    user_info_service = build("oauth2", "v2", credentials=creds)
-    user_info = user_info_service.userinfo().get().execute()
-    email = user_info.get("email", "unknown@gmail.com")
+    try:
+        logger.info("Fetching user info...")
+        user_info_service = build("oauth2", "v2", credentials=creds)
+        user_info = user_info_service.userinfo().get().execute()
+        email = user_info.get("email", "unknown@gmail.com")
+        logger.info(f"OAuth successful for: {email}")
+    except Exception as e:
+        logger.error(f"Failed to get user info: {str(e)}")
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=user_info_failed")
 
-    existing = db.exec(select(DriveToken).where(DriveToken.user_email == email)).first()
+    # Store or update token in database
+    existing = db.exec(select(DriveToken).where(DriveToken.email == email)).first()
     if existing:
+        logger.info(f"Updating existing token for {email}")
         existing.access_token  = creds.token
         existing.refresh_token = creds.refresh_token or existing.refresh_token
-        existing.token_expiry  = str(creds.expiry)
+        from datetime import datetime
+        existing.token_expiry  = creds.expiry
         db.add(existing)
     else:
+        logger.info(f"Creating new token for {email}")
         db.add(DriveToken(
-            user_email=email,
+            email=email,
             access_token=creds.token,
             refresh_token=creds.refresh_token or "",
-            token_expiry=str(creds.expiry),
+            token_expiry=creds.expiry,
         ))
     db.commit()
+    
+    logger.info(f"Redirecting to gdrive?linked=1")
     return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?linked=1")
 
 
@@ -119,7 +147,7 @@ def auth_status(db: Session = Depends(get_session)):
     tokens = db.exec(select(DriveToken)).all()
     return {
         "linked": len(tokens) > 0,
-        "accounts": [{"id": t.id, "email": t.user_email} for t in tokens],
+        "accounts": [{"id": t.id, "email": t.email} for t in tokens],
     }
 
 
@@ -151,19 +179,20 @@ def start_scan(
     if not token:
         raise HTTPException(404, "Drive not linked")
 
-    job = DriveScanJob(user_email=token.user_email)
+    job = DriveScanJob(account_id=token.id)
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    def _run(scan_id: str, email: str):
+    def _run(scan_id: str, token_id: int):
         from app.database import engine
         with Session(engine) as session:
             from app.services.drive_scanner import DriveScanner
-            scanner = DriveScanner(session, email)
+            token = session.get(DriveToken, token_id)
+            scanner = DriveScanner(session, token)
             scanner.run_scan(scan_id)
 
-    background_tasks.add_task(_run, job.id, token.user_email)
+    background_tasks.add_task(_run, job.id, token.id)
     return {"scan_id": job.id}
 
 
@@ -267,7 +296,7 @@ def organise_drive(
         token = db.get(DriveToken, account_id)
     else:
         token = _get_token(db)
-    scanner = DriveScanner(db, token.user_email)
+    scanner = DriveScanner(db, token)
     result = scanner.organise_by_paradigm(scan_id, paradigm)
     return result
 
