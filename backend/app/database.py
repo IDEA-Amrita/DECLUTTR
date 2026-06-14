@@ -2,9 +2,36 @@ from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
-from backend_config import settings
+from app.config import settings 
 import logging
 
+
+# Create engine
+engine = create_engine(
+    "sqlite:///./decluttr.db",
+    connect_args={"check_same_thread": False}
+)
+
+# Create session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Function for existing routers
+def get_session():
+    """Get database session"""
+    return SessionLocal()
+
+# Function for FastAPI dependencies
+def get_db():
+    """FastAPI dependency for DB session"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def create_db():
+    """Create all tables"""
+    Base.metadata.create_all(bind=engine)
 logger = logging.getLogger(__name__)
 
 # SQLAlchemy setup
@@ -90,3 +117,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def create_db():
+    """Create all database tables"""
+    Base.metadata.create_all(bind=engine)
