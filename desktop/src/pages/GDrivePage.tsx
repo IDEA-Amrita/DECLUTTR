@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { api } from '../lib/api'
 import type {
-  DriveScanStatus, DriveCluster, DriveDeletionList, DriveDeletionBucket, DriveOrganisePlan,
+  DriveScanStatus, DriveCluster, DriveDeletionList, DriveOrganisePlan,
   DriveCompression, DriveExecuteReport, DriveFile,
 } from '../lib/api'
 
