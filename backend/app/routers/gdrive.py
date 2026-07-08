@@ -4,7 +4,7 @@ import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import RedirectResponse
-from sqlmodel import Session, select
+from sqlmodel import Session, select, SQLModel
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -143,10 +143,11 @@ def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session 
 
 @router.get("/auth/status")
 def auth_status(db: Session = Depends(get_session)):
-    """Returns accounts in the shape the frontend expects: { linked, accounts: [{id, email}] }"""
+    """Returns accounts in the shape the frontend expects: { linked, email }"""
     tokens = db.exec(select(DriveToken)).all()
     return {
         "linked": len(tokens) > 0,
+        "email": tokens[0].email if tokens else None,
         "accounts": [{"id": t.id, "email": t.email} for t in tokens],
     }
 
@@ -201,11 +202,18 @@ def scan_status(scan_id: str, db: Session = Depends(get_session)):
     job = db.get(DriveScanJob, scan_id)
     if not job:
         raise HTTPException(404, "Scan not found")
+    
+    progress = 0
+    if job.total_files > 0:
+        progress = int((job.processed_files / job.total_files) * 100)
+    progress = max(0, min(100, progress))
+    if job.status == "done":
+        progress = 100
+
     return {
         "scan_id":          job.id,
         "status":           job.status,
-        "total_files":      job.total_files,
-        "processed_files":  job.processed_files,
+        "progress":         progress,
         "duplicates_found": job.duplicates_found,
         "bytes_reclaimable": job.bytes_reclaimable,
         "error_message":    job.error_message,
@@ -217,11 +225,26 @@ def scan_files(scan_id: str, db: Session = Depends(get_session)):
     records = db.exec(
         select(DriveFileRecord).where(DriveFileRecord.scan_id == scan_id)
     ).all()
-    return records
+    # Map to frontend DriveFile shape
+    out = []
+    for r in records:
+        out.append({
+            "id": str(r.id),
+            "drive_file_id": r.drive_id,
+            "name": r.name,
+            "mime_type": r.mime_type,
+            "size_bytes": r.size_bytes,
+            "category": r.category or "unused",
+            "is_flagged": 1 if r.user_flag == "keep" else 0,
+            "description": r.user_description,
+            "ai_reason": r.ai_reason,
+            "in_deletion_list": 1 if r.user_flag == "delete" else 0
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Auto-trash duplicates
+# Step 1 — Auto-trash duplicates (Legacy)
 # ---------------------------------------------------------------------------
 
 @router.post("/duplicates/auto-trash")
@@ -240,17 +263,17 @@ def auto_trash_duplicates(
     records = db.exec(
         select(DriveFileRecord).where(
             DriveFileRecord.scan_id == scan_id,
-            DriveFileRecord.is_duplicate == 1,
+            DriveFileRecord.category == "duplicate",
         )
     ).all()
 
     trashed = 0
     for r in records:
         try:
-            service.files().update(fileId=r.drive_file_id, body={"trashed": True}).execute()
+            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
             trashed += 1
         except Exception as e:
-            logger.warning(f"Could not trash {r.drive_file_id}: {e}")
+            logger.warning(f"Could not trash {r.drive_id}: {e}")
 
     return {"trashed": trashed}
 
@@ -259,8 +282,34 @@ def auto_trash_duplicates(
 # Step 2 — Flag file
 # ---------------------------------------------------------------------------
 
+class FlagDriveFileRequest(SQLModel):
+    description: Optional[str] = ""
+
+
+@router.post("/files/{drive_id}/flag")
+def flag_drive_file(
+    drive_id: str,
+    req: FlagDriveFileRequest,
+    db: Session = Depends(get_session)
+):
+    """Flags a file as 'keep' based on frontend user action."""
+    records = db.exec(
+        select(DriveFileRecord).where(DriveFileRecord.drive_id == drive_id)
+    ).all()
+    if not records:
+        raise HTTPException(404, "File not found")
+
+    for record in records:
+        record.user_flag = "keep"
+        record.user_description = req.description or ""
+        record.is_protected = True
+        db.add(record)
+    db.commit()
+    return {"flagged": True}
+
+
 @router.post("/file/flag")
-def flag_file(
+def legacy_flag_file(
     file_id: int = Query(...),
     flag: str = Query(...),
     description: Optional[str] = Query(None),
@@ -272,9 +321,9 @@ def flag_file(
         raise HTTPException(404, "File not found")
 
     record.user_flag = flag
-    record.description = description or ""
+    record.user_description = description or ""
     if flag == "keep":
-        record.is_flagged = 1
+        record.is_protected = True
     db.add(record)
     db.commit()
     return {"file_record_id": record.id, "flag": flag, "is_protected": flag == "keep"}
@@ -284,8 +333,100 @@ def flag_file(
 # Step 3 — Organise + deletions
 # ---------------------------------------------------------------------------
 
-@router.post("/organise")
+class OrganiseDriveRequest(SQLModel):
+    paradigm: str
+
+
+@router.post("/scan/{scan_id}/organise")
 def organise_drive(
+    scan_id: str,
+    req: OrganiseDriveRequest,
+    account_id: Optional[int] = Query(None),
+    db: Session = Depends(get_session),
+):
+    from app.services.drive_scanner import DriveScanner
+    if account_id:
+        token = db.get(DriveToken, account_id)
+    else:
+        token = db.exec(select(DriveToken)).first()
+
+    if not token:
+        raise HTTPException(404, "Drive not linked")
+
+    scanner = DriveScanner(db, token)
+    result = scanner.organise_by_paradigm(scan_id, req.paradigm)
+    return {
+        "organised": result.get("files_moved", 0),
+        "folders_created": result.get("folders_created", 0),
+        "files_moved": result.get("files_moved", 0),
+    }
+
+
+@router.get("/scan/{scan_id}/deletion-list")
+def get_deletion_list(scan_id: str, db: Session = Depends(get_session)):
+    records = db.exec(
+        select(DriveFileRecord).where(
+            DriveFileRecord.scan_id == scan_id,
+            DriveFileRecord.user_flag == "delete",
+        )
+    ).all()
+    # Map to frontend shape
+    out = []
+    for r in records:
+        out.append({
+            "id": str(r.id),
+            "drive_file_id": r.drive_id,
+            "name": r.name,
+            "mime_type": r.mime_type,
+            "size_bytes": r.size_bytes,
+            "category": r.category or "unused",
+            "is_flagged": 1 if r.user_flag == "keep" else 0,
+            "description": r.user_description,
+            "ai_reason": r.ai_reason,
+            "in_deletion_list": 1 if r.user_flag == "delete" else 0
+        })
+    return out
+
+
+@router.post("/scan/{scan_id}/approve-deletion")
+def approve_deletion(
+    scan_id: str,
+    account_id: Optional[int] = Query(None),
+    db: Session = Depends(get_session),
+):
+    from datetime import datetime
+    if account_id:
+        token = db.get(DriveToken, account_id)
+    else:
+        token = db.exec(select(DriveToken)).first()
+
+    if not token:
+        raise HTTPException(404, "Drive not linked")
+
+    service = _build_service(token)
+
+    records = db.exec(
+        select(DriveFileRecord).where(
+            DriveFileRecord.scan_id == scan_id,
+            DriveFileRecord.user_flag == "delete",
+        )
+    ).all()
+
+    trashed = 0
+    for r in records:
+        try:
+            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
+            r.trashed_at = datetime.utcnow()
+            db.add(r)
+            trashed += 1
+        except Exception as e:
+            logger.warning(f"Could not trash {r.drive_id}: {e}")
+    db.commit()
+    return {"deleted": trashed, "trashed": trashed}
+
+
+@router.post("/organise")
+def legacy_organise_drive(
     scan_id: str = Query(...),
     paradigm: str = Query("type"),
     account_id: Optional[int] = Query(None),
@@ -302,7 +443,7 @@ def organise_drive(
 
 
 @router.post("/deletion-list/execute")
-def execute_deletion(
+def legacy_execute_deletion(
     scan_id: str = Query(...),
     account_id: Optional[int] = Query(None),
     db: Session = Depends(get_session),
@@ -324,9 +465,9 @@ def execute_deletion(
     trashed = 0
     for r in records:
         try:
-            service.files().update(fileId=r.drive_file_id, body={"trashed": True}).execute()
+            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
             trashed += 1
         except Exception as e:
-            logger.warning(f"Could not trash {r.drive_file_id}: {e}")
+            logger.warning(f"Could not trash {r.drive_id}: {e}")
 
     return {"trashed": trashed}

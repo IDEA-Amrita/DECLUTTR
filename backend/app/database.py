@@ -121,3 +121,6 @@ def get_db():
 def create_db():
     """Create all database tables"""
     Base.metadata.create_all(bind=engine)
+    from sqlmodel import SQLModel
+    from app.models import schemas, gdrive_schemas
+    SQLModel.metadata.create_all(bind=engine)
