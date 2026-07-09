@@ -6,6 +6,7 @@ from app.config import settings
 import logging
 
 
+
 # Create engine
 engine = create_engine(
     "sqlite:///./decluttr.db",
