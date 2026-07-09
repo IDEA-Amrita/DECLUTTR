@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends  # type: ignore
 from sqlmodel import Session, select
 
 from app.database import get_session
