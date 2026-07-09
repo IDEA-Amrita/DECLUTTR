@@ -3,7 +3,6 @@ import {
   FolderOpen, Loader2, Trash2, SkipForward, ShieldCheck,
   ChevronDown, ChevronRight, Camera, Copy, HardDrive, Clock, FileImage,
 } from 'lucide-react'
-import { useScan } from '../hooks/useScan'
 import { useScanStore } from '../store/scanStore'
 import { useConsent } from '../hooks/useConsent'
 import { SuggestionCard, TYPE_LABELS, TYPE_COLORS, fmt } from '../components/SuggestionCard'
@@ -188,10 +187,10 @@ function FileGroup({
 // ─── StoragePage ──────────────────────────────────────────────────────────────
 
 export function StoragePage() {
-  const { status, progress, startScan, error } = useScan()
-  // suggestions + selectedIds live in the global store so they survive
-  // navigation to other pages and back
-  const { suggestions, selectedIds, setSuggestions, setSelectedIds } = useScanStore()
+  const {
+    status, progress, startScan, error,
+    suggestions, selectedIds, setSuggestions, setSelectedIds
+  } = useScanStore()
   const [modalItems, setModalItems] = useState<FileSuggestion[]>([])
   const { confirm, skip } = useConsent(setSuggestions)
 

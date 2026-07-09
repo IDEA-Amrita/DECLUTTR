@@ -81,4 +81,39 @@ export const api = {
 
   createSnapshot: () =>
     request<WeeklySnapshot>('/report/snapshot', { method: 'POST' }),
+
+  // Google Drive
+  getDriveAuthStatus: () =>
+    request<{ linked: boolean; email: string | null }>('/gdrive/auth/status'),
+
+getDriveAuthUrl: () =>
+    request<{ auth_url: string }>('/gdrive/auth/url'),
+
+  unlinkDrive: () =>
+    request<{ unlinked: boolean }>('/gdrive/auth/unlink', { method: 'DELETE' }),
+
+  startDriveScan: () =>
+    request<{ scan_id: string }>('/gdrive/scan', { method: 'POST' }),
+
+  getDriveScanStatus: (id: string) =>
+    request<{ status: string; progress: number; duplicates_found: number }>(`/gdrive/scan/${id}/status`),
+
+  getDriveFiles: (id: string) =>
+    request<any[]>(`/gdrive/scan/${id}/files`),
+
+  flagDriveFile: (fileId: string, description: string) =>
+    request<{ flagged: boolean }>(`/gdrive/files/${fileId}/flag`, {
+      method: 'POST', body: JSON.stringify({ description }),
+    }),
+
+  getDriveDeletionList: (id: string) =>
+    request<any[]>(`/gdrive/scan/${id}/deletion-list`),
+
+  approveDriveDeletion: (id: string) =>
+    request<{ deleted: number }>(`/gdrive/scan/${id}/approve-deletion`, { method: 'POST' }),
+
+  organiseDrive: (id: string, paradigm: string) =>
+    request<{ organised: number }>(`/gdrive/scan/${id}/organise`, {
+      method: 'POST', body: JSON.stringify({ paradigm }),
+    }),
 }

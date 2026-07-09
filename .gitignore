@@ -20,3 +20,5 @@ desktop/dist-electron/
 Thumbs.db
 backend/venv/
 venv/
+
+backend/desktop/

@@ -3,7 +3,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import create_db
-from app.routers import storage, consent, photos, protected, report
+
+from app.routers import storage, consent, photos, protected, report, gdrive, scan
+
 
 
 @asynccontextmanager
@@ -32,3 +34,6 @@ app.include_router(consent.router, prefix="/api")
 app.include_router(photos.router, prefix="/api")
 app.include_router(protected.router, prefix="/api")
 app.include_router(report.router, prefix="/api")
+app.include_router(gdrive.router, prefix="/api")
+app.include_router(scan.router, prefix="/api")
+

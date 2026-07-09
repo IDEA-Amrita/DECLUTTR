@@ -262,3 +262,32 @@ def generate_batch_reasons(items: list[dict], module: str) -> dict[str, str]:
 
     # Every provider exhausted — return template strings
     return {item["id"]: _template_reason(item) for item in items}
+
+def get_drive_reason(filename: str, size_mb: float, category: str, days_old: int, mime_type: str) -> str:
+    """
+    Generates a 1-sentence reason for a Drive file suggestion.
+    Uses the same provider fallback chain as generate_batch_reasons.
+    Never receives file contents — only metadata.
+    """
+    prompt = (
+        f"In one sentence (max 15 words), explain why this Google Drive file is digital clutter. "
+        f"File: '{filename}', type: {mime_type}, size: {size_mb}MB, "
+        f"category: {category}, last modified {days_old} days ago. "
+        f"Be specific. Do not start with 'This file'."
+    )
+
+    templates = {
+        "duplicate": f"Exact copy of another file — safe to remove, saving {size_mb:.1f} MB.",
+        "large":     f"Large file ({size_mb:.0f} MB) untouched for {days_old} days — consider compressing.",
+        "old":       f"Unused for {days_old} days — likely safe to archive or remove.",
+        "screenshot": f"Screenshot sitting untouched for {days_old} days.",
+        "unused":    f"Never opened in {days_old} days — a strong candidate for cleanup.",
+    }
+
+    for name, provider_fn in _PROVIDERS:
+        try:
+            return provider_fn(prompt, 60)
+        except Exception:
+            continue
+
+    return templates.get(category, f"Unused {category} file — worth reviewing.")
