@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Float, ForeignKey, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
+from sqlmodel import Session as SQLModelSession
 from datetime import datetime
 from app.config import settings 
 import logging
@@ -13,7 +14,12 @@ engine = create_engine(
 )
 
 # Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    class_=SQLModelSession,
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
 
 # Function for existing routers
 def get_session():
@@ -44,7 +50,12 @@ if settings.DATABASE_URL.startswith("sqlite"):
 else:
     engine = create_engine(settings.DATABASE_URL)
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    class_=SQLModelSession,
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
 Base = declarative_base()
 
 class Scan(Base):

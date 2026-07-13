@@ -8,7 +8,7 @@ import {
 import { api } from '../lib/api'
 import type {
   DriveScanStatus, DriveCluster, DriveDeletionList, DriveOrganisePlan,
-  DriveCompression, DriveExecuteReport, DriveFile,
+  DriveCompression, DriveExecuteReport, DriveFile, DriveDeletionBucket,
 } from '../lib/api'
 
 // ── palette (matches App shell) ────────────────────────────────────────────
@@ -662,7 +662,7 @@ function DeletionBucket({ bucket, onToggle }: { bucket: DriveDeletionBucket; onT
       </button>
       {open && (
         <div className="px-4 pb-3 space-y-1 max-h-64 overflow-y-auto">
-          {bucket.files.slice(0, 50).map(f => (
+          {bucket.files.slice(0, 50).map((f: DriveFile) => (
             <div key={f.id} className="flex items-center gap-2 rounded-md px-2 py-1.5" style={{ background: C.card2 }}>
               {mimeIcon(f.mime_type, 15)}
               <span className="text-sm truncate flex-1" style={{ color: C.text }}>{f.name}</span>
