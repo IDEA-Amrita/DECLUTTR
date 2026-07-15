@@ -197,6 +197,12 @@ export function StoragePage() {
     selectedIds,
     setSuggestions,
     setSelectedIds,
+<<<<<<< HEAD
+=======
+  const {
+    status, progress, startScan, error,
+    suggestions, selectedIds, setSuggestions, setSelectedIds
+>>>>>>> 1af2d7dc88e62cb71f5293a9f6ee6307b761607d
   } = useScanStore()
   const [modalItems, setModalItems] = useState<FileSuggestion[]>([])
   const { confirm, skip } = useConsent(setSuggestions)

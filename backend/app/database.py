@@ -2,6 +2,11 @@ from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlmodel import Session as SQLModelSession
+<<<<<<< HEAD
+=======
+from sqlalchemy.orm import relationship
+from sqlmodel import SQLModel, create_engine, Session
+>>>>>>> 1af2d7dc88e62cb71f5293a9f6ee6307b761607d
 from datetime import datetime
 from app.config import settings 
 import logging
@@ -56,6 +61,10 @@ SessionLocal = sessionmaker(
     autoflush=False,
     bind=engine,
 )
+<<<<<<< HEAD
+=======
+# Base class for pure SQLAlchemy Models (e.g. Scan, FileRecord)
+>>>>>>> 1af2d7dc88e62cb71f5293a9f6ee6307b761607d
 Base = declarative_base()
 
 class Scan(Base):
@@ -121,6 +130,7 @@ def init_db():
         raise
 
 
+<<<<<<< HEAD
 def get_db():
     """Dependency for FastAPI to get DB session"""
     db = SessionLocal()
@@ -128,6 +138,20 @@ def get_db():
         yield db
     finally:
         db.close()
+=======
+def create_db():
+    """Create all database tables (Compatibility helper)"""
+    init_db()
+
+
+def get_db():
+    """Dependency for FastAPI to get a unified SQLModel Session (Supports both SQLAlchemy & SQLModel!)"""
+    with Session(engine) as session:
+        try:
+            yield session
+        finally:
+            pass
+>>>>>>> 1af2d7dc88e62cb71f5293a9f6ee6307b761607d
 
 def _migrate_sqlite_columns():
     """
@@ -196,3 +220,10 @@ def create_db():
         _migrate_sqlite_columns()
     except Exception as e:  # pragma: no cover
         logger.error(f"SQLModel table creation/migration failed: {e}")
+<<<<<<< HEAD
+=======
+
+def get_session():
+    """Get database session helper"""
+    return Session(engine)
+>>>>>>> 1af2d7dc88e62cb71f5293a9f6ee6307b761607d
