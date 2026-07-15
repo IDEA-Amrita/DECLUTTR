@@ -73,6 +73,19 @@ class DriveScanner:
     # STEP 1 — Scan + duplicate clustering (no deletion)
     # ------------------------------------------------------------------
     def run_scan(self, scan_id: str):
+    def _parse_date(self, date_str: Optional[str]) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def run_scan(self, scan_id: str):
+        """
+        Phase A: Pull file list + metadata from Drive.
+        Detect exact duplicates (MD5) and near-duplicates (pHash of thumbnails).
+        """
         job = self.db.get(DriveScanJob, scan_id)
         if not job:
             logger.error(f"Scan {scan_id} not found")
@@ -87,6 +100,11 @@ class DriveScanner:
 
             protected_values = self._load_protected_values()
             all_files = [f for f in self._list_drive_files() if f.get("mimeType") != FOLDER_MIME]
+            # Phase A.1: Pull file list + metadata
+            all_files = self._list_drive_files()
+            # Filter out folder MIME type so we only process files
+            all_files = [f for f in all_files if f.get("mimeType") != "application/vnd.google-apps.folder"]
+            
             job.total_files = len(all_files)
             job.phase = "Detecting duplicates"
             self.db.add(job)
@@ -116,6 +134,62 @@ class DriveScanner:
                 protected = self._is_protected(f, protected_values)
 
                 in_deletion = (not protected) and bucket is not None and confidence >= 50 and not is_original
+            # Phase A.2: Detect exact duplicates by MD5
+            duplicates = self._detect_exact_duplicates(all_files)
+            
+            # Phase A.3: Detect near-duplicates by pHash
+            near_dupes = self._detect_near_duplicates(all_files)
+
+            # Phase A.4: Store file records
+            for idx, file_data in enumerate(all_files):
+                is_duplicate = file_data["id"] in duplicates
+                is_near_dupe = file_data["id"] in near_dupes
+                
+                # Determine category & default ai reason
+                category = "unused"
+                ai_reason = "Rarely used or active file. Review to ensure it is still required."
+                user_flag = None
+                suggested_action = "keep"
+
+                if is_duplicate:
+                    category = "duplicate"
+                    suggested_action = "trash"
+                    user_flag = "delete"
+                    ai_reason = "Exact duplicate of another file, safe to delete."
+                elif is_near_dupe:
+                    category = "duplicate"
+                    suggested_action = "trash"
+                    user_flag = "delete"
+                    ai_reason = "Very similar file detected — consider reviewing."
+                else:
+                    # Check size
+                    size_mb = int(file_data.get("size", 0)) / (1024 * 1024)
+                    if size_mb >= 50:
+                        category = "large"
+                        ai_reason = f"Large file ({size_mb:.1f} MB) taking up substantial space."
+                    else:
+                        # Check modified time
+                        mod_time_str = file_data.get("modifiedTime")
+                        if mod_time_str:
+                            try:
+                                mod_date = datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
+                                days_old = (datetime.now(mod_date.tzinfo) - mod_date).days
+                                if days_old > 365:
+                                    category = "old"
+                                    ai_reason = f"File has not been modified in {days_old} days. Consider archiving."
+                            except Exception:
+                                pass
+                        
+                        # Check screenshot
+                        name_lower = file_data["name"].lower()
+                        if any(name_lower.startswith(p) for p in ["screenshot", "screen ", "img_", "capture"]):
+                            category = "screenshot"
+                            ai_reason = "Screenshot file, typically safe to delete if no longer needed."
+
+                # Check if it was trashed silently
+                trashed_at = None
+                if is_duplicate:
+                    trashed_at = datetime.utcnow()
 
                 record = DriveFileRecord(
                     scan_id=scan_id,
@@ -145,6 +219,20 @@ class DriveScanner:
                     in_deletion_list=in_deletion,
                     deletion_bucket=bucket if in_deletion else None,
                     compressible=self._is_compressible(f, size),
+                    drive_id=file_data["id"],
+                    name=file_data["name"],
+                    mime_type=file_data.get("mimeType", ""),
+                    size_bytes=int(file_data.get("size", 0)),
+                    md5_checksum=file_data.get("md5Checksum"),
+                    created_at=self._parse_date(file_data.get("createdTime")),
+                    modified_at=self._parse_date(file_data.get("modifiedTime")),
+                    category=category,
+                    duplicate_group_hash=file_data.get("md5Checksum") if is_duplicate else None,
+                    suggested_action=suggested_action,
+                    ai_reason=ai_reason,
+                    user_flag=user_flag,
+                    is_protected=False,
+                    trashed_at=trashed_at
                 )
                 self.db.add(record)
 
@@ -158,6 +246,16 @@ class DriveScanner:
                 if job.processed_files % 200 == 0:
                     self.db.add(job)
                     self.db.commit()
+
+                # Commit progress every 20 files
+                if idx % 20 == 0:
+                    self.db.add(job)
+                    self.db.commit()
+            
+            # Phase A.5: Auto-trash exact duplicates silently
+            trashed = self._move_exact_dupes_to_bin(duplicates)
+            job.duplicates_found = len(duplicates)
+            job.bytes_reclaimable = sum(int(f.get("size", 0)) for f in all_files if f["id"] in duplicates)
 
             job.duplicates_found = duplicates_found
             job.clusters_found = len(set(v for v in clusters.values()))
@@ -584,6 +682,58 @@ class DriveScanner:
         return parent
 
     def _find_folder(self, name: str, parent: str) -> Optional[str]:
+    def _get_folder_structure(self, groups: Dict, paradigm: str) -> Dict:
+        """
+        Use AI to suggest folder names and structure.
+        For now, use simple heuristics.
+        """
+        structure = {}
+        for group_name, files in groups.items():
+            structure[group_name] = {
+                "folder_name": group_name,
+                "file_ids": [f.drive_id for f in files],
+                "count": len(files),
+            }
+        return structure
+
+    def _create_and_move_folders(self, structure: Dict) -> tuple:
+        """Create folders and move files into them."""
+        folders_created = 0
+        files_moved = 0
+        
+        for group_name, group_data in structure.items():
+            try:
+                # Create folder if it doesn't exist
+                folder_id = self._get_or_create_folder(group_name)
+                folders_created += 1
+                
+                # Move files into folder
+                for file_id in group_data["file_ids"]:
+                    try:
+                        # Get current parents to remove them
+                        file_info = self.service.files().get(
+                            fileId=file_id,
+                            fields='parents'
+                        ).execute()
+                        previous_parents = ",".join(file_info.get('parents', []))
+
+                        self.service.files().update(
+                            fileId=file_id,
+                            addParents=folder_id,
+                            removeParents=previous_parents,
+                            fields="id, parents"
+                        ).execute()
+                        files_moved += 1
+                    except HttpError as e:
+                        logger.warning(f"Could not move {file_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not create folder {group_name}: {e}")
+        
+        return folders_created, files_moved
+
+    def _get_or_create_folder(self, folder_name: str) -> str:
+        """Get existing folder or create a new one."""
+        # Search for existing folder
         try:
             safe = name.replace("'", "\\'")
             res = self.service.files().list(

@@ -1,10 +1,12 @@
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Float, ForeignKey, Index
+from sqlalchemy import create_engine as sqla_create_engine, Column, String, Integer, DateTime, Boolean, Float, ForeignKey, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlmodel import Session as SQLModelSession
+from sqlalchemy.orm import relationship
+from sqlmodel import SQLModel, create_engine, Session
 from datetime import datetime
-from app.config import settings 
 import logging
+from app.config import settings
 
 
 # Create engine
@@ -40,15 +42,16 @@ def create_db():
     Base.metadata.create_all(bind=engine)
 logger = logging.getLogger(__name__)
 
-# SQLAlchemy setup
-if settings.DATABASE_URL.startswith("sqlite"):
+# Initialize the database engine based on configurations
+DATABASE_URL = getattr(settings, "DATABASE_URL", "sqlite:///./decluttr.db")
+if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
-        settings.DATABASE_URL,
+        DATABASE_URL,
         connect_args={"check_same_thread": False},
         echo=False
     )
 else:
-    engine = create_engine(settings.DATABASE_URL)
+    engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(
     class_=SQLModelSession,
@@ -56,6 +59,7 @@ SessionLocal = sessionmaker(
     autoflush=False,
     bind=engine,
 )
+# Base class for pure SQLAlchemy Models (e.g. Scan, FileRecord)
 Base = declarative_base()
 
 class Scan(Base):
@@ -114,20 +118,29 @@ class FileRecord(Base):
 def init_db():
     """Initialize database tables"""
     try:
+        # Create standard SQLAlchemy tables
         Base.metadata.create_all(bind=engine)
+        # Create SQLModel metadata tables (e.g. ConsentLog, WeeklySnapshot)
+        from app.models import schemas, gdrive_schemas
+        SQLModel.metadata.create_all(bind=engine)
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
 
 
+def create_db():
+    """Create all database tables (Compatibility helper)"""
+    init_db()
+
+
 def get_db():
-    """Dependency for FastAPI to get DB session"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    """Dependency for FastAPI to get a unified SQLModel Session (Supports both SQLAlchemy & SQLModel!)"""
+    with Session(engine) as session:
+        try:
+            yield session
+        finally:
+            pass
 
 def _migrate_sqlite_columns():
     """
@@ -196,3 +209,7 @@ def create_db():
         _migrate_sqlite_columns()
     except Exception as e:  # pragma: no cover
         logger.error(f"SQLModel table creation/migration failed: {e}")
+
+def get_session():
+    """Get database session helper"""
+    return Session(engine)
