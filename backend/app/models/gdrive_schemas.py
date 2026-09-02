@@ -1,9 +1,9 @@
 """
 gdrive_schemas.py
-Add these models to your existing backend/app/models/schemas.py
-(or import from here and include in the SQLModel metadata)
+SQLModel tables + Pydantic request/response shapes for the Phase 2
+Cloud Cleanup & Organization flow.
 
-Mirrors the existing DECLUTTR SQLModel + Pydantic style exactly.
+Mirrors the existing DECLUTTR SQLModel style.
 """
 
 from datetime import datetime
@@ -35,10 +35,13 @@ class DriveScanJob(SQLModel, table=True):
 
     id: str = Field(default_factory=lambda: str(_uuid.uuid4()), primary_key=True)
     account_id: int = Field(foreign_key="drive_token.id")
-    status: str = Field(default="pending")   # pending | running | done | error
+    status: str = Field(default="pending")   # pending | scanning | done | error
+    phase: Optional[str] = None              # human-readable phase label
     total_files: int = Field(default=0)
     processed_files: int = Field(default=0)
     duplicates_found: int = Field(default=0)
+    clusters_found: int = Field(default=0)
+    deletion_candidates: int = Field(default=0)
     bytes_reclaimable: int = Field(default=0)
     error_message: Optional[str] = None
     started_at: datetime = Field(default_factory=datetime.utcnow)
@@ -50,13 +53,13 @@ class DriveFileRecord(SQLModel, table=True):
     __tablename__ = "drive_file_record"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: str = Field(foreign_key="drive_scan_job.id")
+    scan_id: str = Field(foreign_key="drive_scan_job.id", index=True)
     account_id: int = Field(foreign_key="drive_token.id")
 
-    # Google Drive metadata
+    # Google Drive metadata (never file content)
     drive_id: str = Field(index=True)           # Drive file id
     name: str
-    mime_type: str
+    mime_type: str = Field(default="")
     size_bytes: int = Field(default=0)
     md5_checksum: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -66,25 +69,40 @@ class DriveFileRecord(SQLModel, table=True):
     thumbnail_link: Optional[str] = None
     web_view_link: Optional[str] = None
 
-    # Location metadata (for photos/videos — never file content)
+    # Location metadata (from EXIF only — never file content)
     location_lat: Optional[float] = None
     location_lon: Optional[float] = None
-    capture_date: Optional[str] = None         # EXIF date from imageMediaMetadata
+    capture_date: Optional[str] = None
 
     # Classification
-    category: Optional[str] = None             # duplicate | large | old | unused | screenshot
+    category: Optional[str] = None             # duplicate | near_duplicate | large | old | screenshot | unused | normal
+    duplicate_group_id: Optional[str] = None   # cluster id shared across a duplicate set
     duplicate_group_hash: Optional[str] = None # md5 group key
-    suggested_action: Optional[str] = None     # trash | compress | keep
+    is_cluster_original: bool = False          # the file kept from a duplicate cluster
+    suggested_action: Optional[str] = None     # trash | compress | keep | organize
     ai_reason: Optional[str] = None
+    confidence: int = Field(default=0)         # 1-100 safe-to-delete confidence
 
     # User review (Step 2)
-    user_flag: Optional[str] = None            # keep | delete | skip
-    user_description: Optional[str] = None     # Short description user writes
-    is_protected: bool = False
+    user_flag: Optional[str] = None            # keep_forever | review_later | normal
+    user_description: Optional[str] = None     # local-only description
+    location_tag: Optional[str] = None
+    is_protected: bool = False                 # protected by description / flag / whitelist
+
+    # Deletion list (Step 6)
+    in_deletion_list: bool = False
+    deletion_bucket: Optional[str] = None      # old_screenshots | duplicate_attachments | unused_downloads | near_duplicate | large_unused
+
+    # Organization (Step 5)
+    target_folder_path: Optional[str] = None
+    moved_to_folder: Optional[str] = None
+    is_organized: bool = False
+
+    # Compression (Step 4)
+    compressible: bool = False
 
     # Outcome
     trashed_at: Optional[datetime] = None
-    moved_to_folder: Optional[str] = None
 
 
 class DriveFolderRule(SQLModel, table=True):
@@ -93,9 +111,41 @@ class DriveFolderRule(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     account_id: int = Field(foreign_key="drive_token.id")
-    paradigm: str                               # date | type | personal_professional | usage_age
+    paradigm: str                               # type | category | time | location | smart
     folder_name: str
-    match_condition: str                        # JSON string — e.g. {"mime_prefix": "image/"}
+    match_condition: str                        # JSON string
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DriveActionLog(SQLModel, table=True):
+    """Records every mutating action so a cleanup can be undone (30-day window)."""
+    __tablename__ = "drive_action_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_id: str = Field(index=True)
+    account_id: int
+    action_type: str                            # trash | move | create_folder
+    drive_id: Optional[str] = None              # affected file / folder
+    prev_parents: Optional[str] = None          # comma-separated parent ids (for move undo)
+    new_parents: Optional[str] = None
+    detail: Optional[str] = None
+    undone: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CompressionTask(SQLModel, table=True):
+    """Tracks a large-file compression task (Step 4)."""
+    __tablename__ = "drive_compression_task"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_id: str = Field(index=True)
+    source_file_id: str
+    name: str
+    compression_type: str                       # video_encode | image_optimize | archive
+    original_size: int = 0
+    estimated_size: int = 0
+    compressed_size: int = 0
+    status: str = Field(default="pending")      # pending | in_progress | completed | failed | skipped
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -104,44 +154,28 @@ class DriveFolderRule(SQLModel, table=True):
 # ---------------------------------------------------------------------------
 
 class DriveScanRequest(SQLModel):
-    account_id: int
+    account_id: Optional[int] = None
 
-class DriveFileFlag(SQLModel):
-    file_id: int                # DriveFileRecord primary key
-    flag: str                   # keep | delete | skip
+
+class DriveKeepRequest(SQLModel):
+    """Step 2 — keep ONE file from a cluster, optionally with context."""
+    record_id: int
     description: Optional[str] = None
+    flag: str = "normal"                        # keep_forever | review_later | normal
+    location_tag: Optional[str] = None
 
-class DriveMoveRequest(SQLModel):
-    file_id: str                # Drive file id
-    folder_id: str              # destination Drive folder id
 
 class DriveOrganiseRequest(SQLModel):
-    account_id: int
-    paradigm: str               # date | type | personal_professional | usage_age
+    """Step 3 — ordered list of paradigms (highest priority first)."""
+    paradigms: List[str]                        # ["type", "time", "category", ...]
 
-class DriveScanStatusResponse(SQLModel):
-    scan_id: str
-    status: str
-    total_files: int
-    processed_files: int
-    duplicates_found: int
-    bytes_reclaimable: int
-    error_message: Optional[str] = None
 
-class DriveFileResponse(SQLModel):
-    id: int
-    drive_id: str
-    name: str
-    mime_type: str
-    size_bytes: int
-    category: Optional[str]
-    duplicate_group_hash: Optional[str]
-    suggested_action: Optional[str]
-    ai_reason: Optional[str]
-    user_flag: Optional[str]
-    user_description: Optional[str]
-    thumbnail_link: Optional[str]
-    web_view_link: Optional[str]
-    capture_date: Optional[str]
-    modified_at: Optional[datetime]
-    is_protected: bool
+class DriveDeletionToggleRequest(SQLModel):
+    record_id: int
+    in_deletion_list: bool
+
+
+class DriveExecuteRequest(SQLModel):
+    do_delete: bool = True
+    do_organize: bool = True
+    do_compress: bool = False

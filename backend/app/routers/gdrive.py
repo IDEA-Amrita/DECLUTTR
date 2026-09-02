@@ -1,22 +1,27 @@
 import os
-import json
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import RedirectResponse
 from sqlmodel import Session, select, SQLModel
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from app.database import get_session
-from app.models.gdrive_schemas import DriveToken, DriveScanJob, DriveFileRecord
+
+from app.database import engine
+from app.models.gdrive_schemas import (
+    DriveToken, DriveScanJob, DriveFileRecord, CompressionTask,
+    DriveKeepRequest, DriveOrganiseRequest, DriveDeletionToggleRequest, DriveExecuteRequest,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/gdrive", tags=["gdrive"])
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.metadata.readonly",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
@@ -25,8 +30,15 @@ FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 BACKEND_ORIGIN  = os.getenv("BACKEND_ORIGIN",  "http://localhost:8000")
 REDIRECT_URI    = f"{BACKEND_ORIGIN}/api/gdrive/auth/callback"
 
-# In-memory store for flow state (state -> flow object)
-_flow_store = {}
+_flow_store: Dict[str, Flow] = {}
+
+
+# ---------------------------------------------------------------------------
+# DB session dependency — a real SQLModel Session so .exec() works
+# ---------------------------------------------------------------------------
+def get_db():
+    with Session(engine) as session:
+        yield session
 
 
 def _build_flow() -> Flow:
@@ -39,96 +51,60 @@ def _build_flow() -> Flow:
             "redirect_uris": [REDIRECT_URI],
         }
     }
-    return Flow.from_client_config(
-        client_config, 
-        scopes=SCOPES, 
-        redirect_uri=REDIRECT_URI,
-    )
+    return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
 
 
-def _get_token(db: Session) -> DriveToken:
-    token = db.exec(select(DriveToken)).first()
+def _resolve_token(db: Session, account_id: Optional[int]) -> DriveToken:
+    token = db.get(DriveToken, account_id) if account_id else db.exec(select(DriveToken)).first()
     if not token:
         raise HTTPException(404, "Drive not linked. Please link your Google Drive first.")
     return token
 
 
-def _build_service(token: DriveToken):
-    creds = Credentials(
-        token=token.access_token,
-        refresh_token=token.refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-    )
-    return build("drive", "v3", credentials=creds)
+def _scanner(db: Session, token: DriveToken):
+    from app.services.drive_scanner import DriveScanner
+    return DriveScanner(db, token)
 
 
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
-
 @router.get("/auth/url")
 def get_auth_url():
-    """Generate OAuth URL and store flow in memory keyed by state."""
     flow = _build_flow()
     auth_url, state = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-        include_granted_scopes="true"
+        access_type="offline", prompt="consent", include_granted_scopes="true"
     )
-    
-    # Store the flow keyed by state for later retrieval on callback
     _flow_store[state] = flow
-    logger.info(f"Generated auth URL for state: {state}")
-    
     return {"auth_url": auth_url}
 
 
 @router.get("/auth/callback")
-def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session = Depends(get_session)):
-    """OAuth callback. Retrieves stored flow and exchanges code for token."""
-    
-    # Retrieve the flow that was stored in get_auth_url
+def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session = Depends(get_db)):
     if state not in _flow_store:
-        logger.error(f"State {state} not found in flow store. Available states: {list(_flow_store.keys())}")
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=invalid_state")
-    
-    flow = _flow_store.pop(state)  # Remove after retrieval
-    
+    flow = _flow_store.pop(state)
     try:
-        logger.info(f"Exchanging authorization code for token (state={state})")
         flow.fetch_token(code=code)
-        logger.info(f"Successfully fetched token")
     except Exception as e:
-        logger.error(f"Token fetch failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Token fetch failed: {e}")
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=token_fetch_failed")
-    
-    creds: Credentials = flow.credentials
 
+    creds: Credentials = flow.credentials
     try:
-        logger.info("Fetching user info...")
-        user_info_service = build("oauth2", "v2", credentials=creds)
-        user_info = user_info_service.userinfo().get().execute()
-        email = user_info.get("email", "unknown@gmail.com")
-        logger.info(f"OAuth successful for: {email}")
+        info = build("oauth2", "v2", credentials=creds).userinfo().get().execute()
+        email = info.get("email", "unknown@gmail.com")
     except Exception as e:
-        logger.error(f"Failed to get user info: {str(e)}")
+        logger.error(f"user info failed: {e}")
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=user_info_failed")
 
-    # Store or update token in database
     existing = db.exec(select(DriveToken).where(DriveToken.email == email)).first()
     if existing:
-        logger.info(f"Updating existing token for {email}")
         existing.access_token  = creds.token
         existing.refresh_token = creds.refresh_token or existing.refresh_token
-        from datetime import datetime
         existing.token_expiry  = creds.expiry
         db.add(existing)
     else:
-        logger.info(f"Creating new token for {email}")
         db.add(DriveToken(
             email=email,
             access_token=creds.token,
@@ -136,14 +112,11 @@ def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session 
             token_expiry=creds.expiry,
         ))
     db.commit()
-    
-    logger.info(f"Redirecting to gdrive?linked=1")
     return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?linked=1")
 
 
 @router.get("/auth/status")
-def auth_status(db: Session = Depends(get_session)):
-    """Returns accounts in the shape the frontend expects: { linked, email }"""
+def auth_status(db: Session = Depends(get_db)):
     tokens = db.exec(select(DriveToken)).all()
     return {
         "linked": len(tokens) > 0,
@@ -153,321 +126,246 @@ def auth_status(db: Session = Depends(get_session)):
 
 
 @router.delete("/auth/unlink")
-def unlink_auth(db: Session = Depends(get_session)):
-    token = db.exec(select(DriveToken)).first()
-    if token:
-        db.delete(token)
-        db.commit()
+def unlink_auth(db: Session = Depends(get_db)):
+    for t in db.exec(select(DriveToken)).all():
+        db.delete(t)
+    db.commit()
     return {"unlinked": True}
 
 
 # ---------------------------------------------------------------------------
-# Scan
+# STEP 1 — Scan
 # ---------------------------------------------------------------------------
-
 @router.post("/scan")
-def start_scan(
-    background_tasks: BackgroundTasks,
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    """Starts a full Drive metadata scan. account_id is optional — uses first linked account if omitted."""
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = db.exec(select(DriveToken)).first()
-
-    if not token:
-        raise HTTPException(404, "Drive not linked")
-
+def start_scan(background_tasks: BackgroundTasks,
+               account_id: Optional[int] = Query(None),
+               db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
     job = DriveScanJob(account_id=token.id)
     db.add(job)
     db.commit()
     db.refresh(job)
 
     def _run(scan_id: str, token_id: int):
-        from app.database import engine
-        with Session(engine) as session:
+        with Session(engine) as s:
             from app.services.drive_scanner import DriveScanner
-            token = session.get(DriveToken, token_id)
-            scanner = DriveScanner(session, token)
-            scanner.run_scan(scan_id)
+            tok = s.get(DriveToken, token_id)
+            DriveScanner(s, tok).run_scan(scan_id)
 
     background_tasks.add_task(_run, job.id, token.id)
     return {"scan_id": job.id}
 
 
 @router.get("/scan/{scan_id}/status")
-def scan_status(scan_id: str, db: Session = Depends(get_session)):
+def scan_status(scan_id: str, db: Session = Depends(get_db)):
     job = db.get(DriveScanJob, scan_id)
     if not job:
         raise HTTPException(404, "Scan not found")
-    
-    progress = 0
-    if job.total_files > 0:
-        progress = int((job.processed_files / job.total_files) * 100)
-    progress = max(0, min(100, progress))
-    if job.status == "done":
-        progress = 100
-
+    progress = int((job.processed_files / job.total_files) * 100) if job.total_files else (
+        100 if job.status == "done" else 0
+    )
     return {
-        "scan_id":          job.id,
-        "status":           job.status,
-        "progress":         progress,
+        "scan_id": job.id,
+        "status": job.status,
+        "phase": job.phase,
+        "progress": progress,
+        "total_files": job.total_files,
+        "processed_files": job.processed_files,
         "duplicates_found": job.duplicates_found,
+        "clusters_found": job.clusters_found,
+        "deletion_candidates": job.deletion_candidates,
         "bytes_reclaimable": job.bytes_reclaimable,
-        "error_message":    job.error_message,
+        "error_message": job.error_message,
+    }
+
+
+def _file_dict(r: DriveFileRecord) -> Dict[str, Any]:
+    return {
+        "id": r.id,
+        "drive_id": r.drive_id,
+        "name": r.name,
+        "mime_type": r.mime_type,
+        "size_bytes": r.size_bytes,
+        "category": r.category,
+        "confidence": r.confidence,
+        "duplicate_group_id": r.duplicate_group_id,
+        "is_cluster_original": r.is_cluster_original,
+        "ai_reason": r.ai_reason,
+        "user_flag": r.user_flag,
+        "user_description": r.user_description,
+        "is_protected": r.is_protected,
+        "in_deletion_list": r.in_deletion_list,
+        "deletion_bucket": r.deletion_bucket,
+        "thumbnail_link": r.thumbnail_link,
+        "web_view_link": r.web_view_link,
+        "target_folder_path": r.target_folder_path,
+        "modified_at": r.modified_at.isoformat() if r.modified_at else None,
     }
 
 
 @router.get("/scan/{scan_id}/files")
-def scan_files(scan_id: str, db: Session = Depends(get_session)):
-    records = db.exec(
-        select(DriveFileRecord).where(DriveFileRecord.scan_id == scan_id)
-    ).all()
-    # Map to frontend DriveFile shape
-    out = []
-    for r in records:
-        out.append({
-            "id": str(r.id),
-            "drive_file_id": r.drive_id,
-            "name": r.name,
-            "mime_type": r.mime_type,
-            "size_bytes": r.size_bytes,
-            "category": r.category or "unused",
-            "is_flagged": 1 if r.user_flag == "keep" else 0,
-            "description": r.user_description,
-            "ai_reason": r.ai_reason,
-            "in_deletion_list": 1 if r.user_flag == "delete" else 0
-        })
-    return out
+def scan_files(scan_id: str, db: Session = Depends(get_db)):
+    records = db.exec(select(DriveFileRecord).where(DriveFileRecord.scan_id == scan_id)).all()
+    return [_file_dict(r) for r in records]
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Auto-trash duplicates (Legacy)
+# STEP 2 — Duplicate cluster review
 # ---------------------------------------------------------------------------
-
-@router.post("/duplicates/auto-trash")
-def auto_trash_duplicates(
-    scan_id: str = Query(...),
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = _get_token(db)
-
-    service = _build_service(token)
-
+@router.get("/scan/{scan_id}/clusters")
+def get_clusters(scan_id: str, db: Session = Depends(get_db)):
     records = db.exec(
         select(DriveFileRecord).where(
             DriveFileRecord.scan_id == scan_id,
-            DriveFileRecord.category == "duplicate",
+            DriveFileRecord.duplicate_group_id != None,  # noqa: E711
         )
     ).all()
-
-    trashed = 0
+    groups: Dict[str, List[DriveFileRecord]] = defaultdict(list)
     for r in records:
-        try:
-            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
-            trashed += 1
-        except Exception as e:
-            logger.warning(f"Could not trash {r.drive_id}: {e}")
+        groups[r.duplicate_group_id].append(r)
 
-    return {"trashed": trashed}
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — Flag file
-# ---------------------------------------------------------------------------
-
-class FlagDriveFileRequest(SQLModel):
-    description: Optional[str] = ""
+    clusters = []
+    for gid, files in groups.items():
+        files.sort(key=lambda x: (not x.is_cluster_original, x.name))
+        clusters.append({
+            "group_id": gid,
+            "count": len(files),
+            "total_bytes": sum(f.size_bytes for f in files),
+            "files": [_file_dict(f) for f in files],
+        })
+    clusters.sort(key=lambda c: c["count"], reverse=True)
+    return {"clusters": clusters, "cluster_count": len(clusters)}
 
 
-@router.post("/files/{drive_id}/flag")
-def flag_drive_file(
-    drive_id: str,
-    req: FlagDriveFileRequest,
-    db: Session = Depends(get_session)
-):
-    """Flags a file as 'keep' based on frontend user action."""
-    records = db.exec(
-        select(DriveFileRecord).where(DriveFileRecord.drive_id == drive_id)
-    ).all()
-    if not records:
-        raise HTTPException(404, "File not found")
-
-    for record in records:
-        record.user_flag = "keep"
-        record.user_description = req.description or ""
-        record.is_protected = True
-        db.add(record)
-    db.commit()
-    return {"flagged": True}
-
-
-@router.post("/file/flag")
-def legacy_flag_file(
-    file_id: int = Query(...),
-    flag: str = Query(...),
-    description: Optional[str] = Query(None),
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    record = db.get(DriveFileRecord, file_id)
-    if not record:
-        raise HTTPException(404, "File not found")
-
-    record.user_flag = flag
-    record.user_description = description or ""
-    if flag == "keep":
-        record.is_protected = True
-    db.add(record)
-    db.commit()
-    return {"file_record_id": record.id, "flag": flag, "is_protected": flag == "keep"}
+@router.post("/scan/{scan_id}/keep")
+def keep_file(scan_id: str, req: DriveKeepRequest,
+              account_id: Optional[int] = Query(None),
+              db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
+    try:
+        return _scanner(db, token).keep_file(
+            req.record_id, req.description, req.flag, req.location_tag
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Organise + deletions
+# STEP 3 / 5 — Organization planning
 # ---------------------------------------------------------------------------
-
-class OrganiseDriveRequest(SQLModel):
-    paradigm: str
-
-
 @router.post("/scan/{scan_id}/organise")
-def organise_drive(
-    scan_id: str,
-    req: OrganiseDriveRequest,
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    from app.services.drive_scanner import DriveScanner
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = db.exec(select(DriveToken)).first()
+def plan_organise(scan_id: str, req: DriveOrganiseRequest,
+                  account_id: Optional[int] = Query(None),
+                  db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
+    return _scanner(db, token).plan_organization(scan_id, req.paradigms)
 
-    if not token:
-        raise HTTPException(404, "Drive not linked")
 
-    scanner = DriveScanner(db, token)
-    result = scanner.organise_by_paradigm(scan_id, req.paradigm)
+# ---------------------------------------------------------------------------
+# STEP 4 — Compression candidates (identification only)
+# ---------------------------------------------------------------------------
+@router.get("/scan/{scan_id}/compression")
+def compression(scan_id: str, account_id: Optional[int] = Query(None),
+                db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
+    candidates = _scanner(db, token).compression_candidates(scan_id)
+    total_orig = sum(c["original_size"] for c in candidates)
+    total_est = sum(c["estimated_size"] for c in candidates)
     return {
-        "organised": result.get("files_moved", 0),
-        "folders_created": result.get("folders_created", 0),
-        "files_moved": result.get("files_moved", 0),
+        "candidates": candidates,
+        "count": len(candidates),
+        "original_bytes": total_orig,
+        "estimated_bytes": total_est,
+        "savings_bytes": total_orig - total_est,
     }
 
 
+# ---------------------------------------------------------------------------
+# STEP 6 — Deletion list + execution
+# ---------------------------------------------------------------------------
+_BUCKET_LABELS = {
+    "old_screenshots": "Old Screenshots",
+    "duplicate_attachments": "Duplicates",
+    "unused_downloads": "Unused Downloads",
+    "near_duplicate": "Near Duplicates",
+    "large_unused": "Large Idle Files",
+}
+
+
 @router.get("/scan/{scan_id}/deletion-list")
-def get_deletion_list(scan_id: str, db: Session = Depends(get_session)):
-    records = db.exec(
-        select(DriveFileRecord).where(
-            DriveFileRecord.scan_id == scan_id,
-            DriveFileRecord.user_flag == "delete",
-        )
+def deletion_list(scan_id: str, db: Session = Depends(get_db)):
+    all_records = db.exec(
+        select(DriveFileRecord).where(DriveFileRecord.scan_id == scan_id)
     ).all()
-    # Map to frontend shape
-    out = []
-    for r in records:
-        out.append({
-            "id": str(r.id),
-            "drive_file_id": r.drive_id,
-            "name": r.name,
-            "mime_type": r.mime_type,
-            "size_bytes": r.size_bytes,
-            "category": r.category or "unused",
-            "is_flagged": 1 if r.user_flag == "keep" else 0,
-            "description": r.user_description,
-            "ai_reason": r.ai_reason,
-            "in_deletion_list": 1 if r.user_flag == "delete" else 0
+    del_records = [r for r in all_records if r.in_deletion_list and not r.is_protected]
+
+    buckets: Dict[str, List[DriveFileRecord]] = defaultdict(list)
+    for r in del_records:
+        buckets[r.deletion_bucket or "near_duplicate"].append(r)
+
+    bucket_out = []
+    for key, files in buckets.items():
+        bucket_out.append({
+            "key": key,
+            "label": _BUCKET_LABELS.get(key, key),
+            "count": len(files),
+            "total_bytes": sum(f.size_bytes for f in files),
+            "files": [_file_dict(f) for f in sorted(files, key=lambda x: -x.size_bytes)],
         })
-    return out
+    bucket_out.sort(key=lambda b: b["count"], reverse=True)
+
+    total_bytes = sum(r.size_bytes for r in del_records)
+    avg_conf = int(sum(r.confidence for r in del_records) / len(del_records)) if del_records else 0
+
+    excluded_described = sum(1 for r in all_records if r.user_description)
+    excluded_protected = sum(1 for r in all_records if r.is_protected)
+    excluded_recent = sum(
+        1 for r in all_records
+        if not r.in_deletion_list and (r.category in (None, "normal"))
+    )
+
+    return {
+        "total_files": len(del_records),
+        "total_bytes": total_bytes,
+        "avg_confidence": avg_conf,
+        "buckets": bucket_out,
+        "excluded": {
+            "described": excluded_described,
+            "protected": excluded_protected,
+            "recent": excluded_recent,
+        },
+    }
 
 
-@router.post("/scan/{scan_id}/approve-deletion")
-def approve_deletion(
-    scan_id: str,
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    from datetime import datetime
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = db.exec(select(DriveToken)).first()
-
-    if not token:
-        raise HTTPException(404, "Drive not linked")
-
-    service = _build_service(token)
-
-    records = db.exec(
-        select(DriveFileRecord).where(
-            DriveFileRecord.scan_id == scan_id,
-            DriveFileRecord.user_flag == "delete",
-        )
-    ).all()
-
-    trashed = 0
-    for r in records:
-        try:
-            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
-            r.trashed_at = datetime.utcnow()
-            db.add(r)
-            trashed += 1
-        except Exception as e:
-            logger.warning(f"Could not trash {r.drive_id}: {e}")
+@router.post("/scan/{scan_id}/deletion-list/toggle")
+def toggle_deletion(scan_id: str, req: DriveDeletionToggleRequest,
+                    db: Session = Depends(get_db)):
+    record = db.get(DriveFileRecord, req.record_id)
+    if not record or record.scan_id != scan_id:
+        raise HTTPException(404, "File not found")
+    record.in_deletion_list = req.in_deletion_list
+    if not req.in_deletion_list:
+        record.deletion_bucket = None
+    elif not record.deletion_bucket:
+        record.deletion_bucket = record.deletion_bucket or (record.category or "near_duplicate")
+    db.add(record)
     db.commit()
-    return {"deleted": trashed, "trashed": trashed}
+    return {"record_id": record.id, "in_deletion_list": record.in_deletion_list}
 
 
-@router.post("/organise")
-def legacy_organise_drive(
-    scan_id: str = Query(...),
-    paradigm: str = Query("type"),
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    from app.services.drive_scanner import DriveScanner
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = _get_token(db)
-    scanner = DriveScanner(db, token)
-    result = scanner.organise_by_paradigm(scan_id, paradigm)
-    return result
+@router.post("/scan/{scan_id}/execute")
+def execute_cleanup(scan_id: str, req: DriveExecuteRequest,
+                    account_id: Optional[int] = Query(None),
+                    db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
+    return _scanner(db, token).execute_cleanup(
+        scan_id, req.do_delete, req.do_organize, req.do_compress
+    )
 
 
-@router.post("/deletion-list/execute")
-def legacy_execute_deletion(
-    scan_id: str = Query(...),
-    account_id: Optional[int] = Query(None),
-    db: Session = Depends(get_session),
-):
-    if account_id:
-        token = db.get(DriveToken, account_id)
-    else:
-        token = _get_token(db)
+@router.post("/scan/{scan_id}/undo")
+def undo_cleanup(scan_id: str, account_id: Optional[int] = Query(None),
+                 db: Session = Depends(get_db)):
+    token = _resolve_token(db, account_id)
+    return _scanner(db, token).undo(scan_id)
 
-    service = _build_service(token)
-
-    records = db.exec(
-        select(DriveFileRecord).where(
-            DriveFileRecord.scan_id == scan_id,
-            DriveFileRecord.user_flag == "delete",
-        )
-    ).all()
-
-    trashed = 0
-    for r in records:
-        try:
-            service.files().update(fileId=r.drive_id, body={"trashed": True}).execute()
-            trashed += 1
-        except Exception as e:
-            logger.warning(f"Could not trash {r.drive_id}: {e}")
-
-    return {"trashed": trashed}
