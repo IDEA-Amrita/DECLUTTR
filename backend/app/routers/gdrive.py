@@ -80,16 +80,40 @@ def get_auth_url():
     return {"auth_url": auth_url}
 
 
+from fastapi.responses import RedirectResponse, HTMLResponse
+
 @router.get("/auth/callback")
 def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session = Depends(get_db)):
+    error_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Connection Error - Declutter AI</title>
+      <style>
+        body { background: #0D0D0F; color: #F2F2F3; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #161618; border: 1px solid #FF4D4D; padding: 40px; border-radius: 16px; text-align: center; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h1 { font-size: 20px; color: #FF4D4D; margin: 0 0 10px; }
+        p { color: #8A8A96; font-size: 14px; margin: 0; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>Authentication Failed</h1>
+        <p>Could not connect Google Drive. Please return to the Declutter AI desktop application and try again.</p>
+      </div>
+    </body>
+    </html>
+    """
+
     if state not in _flow_store:
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=invalid_state")
+        return HTMLResponse(content=error_html, status_code=400)
     flow = _flow_store.pop(state)
     try:
         flow.fetch_token(code=code)
     except Exception as e:
         logger.error(f"Token fetch failed: {e}")
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=token_fetch_failed")
+        return HTMLResponse(content=error_html, status_code=400)
 
     creds: Credentials = flow.credentials
     try:
@@ -97,7 +121,7 @@ def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session 
         email = info.get("email", "unknown@gmail.com")
     except Exception as e:
         logger.error(f"user info failed: {e}")
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?error=user_info_failed")
+        return HTMLResponse(content=error_html, status_code=400)
 
     existing = db.exec(select(DriveToken).where(DriveToken.email == email)).first()
     if existing:
@@ -113,7 +137,39 @@ def oauth_callback(code: str = Query(...), state: str = Query(...), db: Session 
             token_expiry=creds.expiry,
         ))
     db.commit()
-    return RedirectResponse(url=f"{FRONTEND_ORIGIN}/gdrive?linked=1")
+
+    success_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Google Drive Connected - Declutter AI</title>
+      <style>
+        body {{ background: #0D0D0F; color: #F2F2F3; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+        .card {{ background: #161618; border: 1px solid #2A2A2E; padding: 40px; border-radius: 16px; text-align: center; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
+        .icon {{ font-size: 48px; margin-bottom: 16px; }}
+        h1 {{ font-size: 22px; margin: 0 0 10px; color: #22C55E; font-weight: 600; }}
+        p {{ color: #8A8A96; font-size: 14px; margin-bottom: 16px; line-height: 1.5; }}
+        .email {{ background: #1C1C20; color: #7B61FF; padding: 6px 12px; border-radius: 20px; font-family: monospace; font-size: 13px; border: 1px solid #2A2A2E; display: inline-block; margin-bottom: 20px; }}
+        .btn {{ background: #7B61FF; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }}
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="icon">✨</div>
+        <h1>Google Drive Connected</h1>
+        <div class="email">{email}</div>
+        <p>Your Google Drive account has been successfully linked to <strong>Declutter AI</strong>.</p>
+        <p>You can close this tab and return to the desktop application.</p>
+        <button class="btn" onclick="window.close()">Close Tab</button>
+      </div>
+      <script>
+        setTimeout(function() {{ window.close(); }}, 2500);
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=success_html)
 
 
 @router.get("/auth/status")

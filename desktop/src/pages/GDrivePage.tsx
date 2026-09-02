@@ -87,10 +87,25 @@ export default function GDrivePage() {
   }, [])
 
   const linkAccount = () => {
+    setBanner('Opening browser for Google authentication…')
     api.getDriveAuthUrl().then(d => {
       const opener = (window as any).electron?.openExternal
       if (opener) opener(d.auth_url)
       else window.open(d.auth_url, '_blank')
+
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = setInterval(async () => {
+        const auth = await api.getDriveAuthStatus()
+        if (auth.linked) {
+          setLinked(true)
+          setEmail(auth.email)
+          setBanner('Google Drive linked successfully.')
+          if (pollRef.current) {
+            clearInterval(pollRef.current)
+            pollRef.current = null
+          }
+        }
+      }, 1200)
     })
   }
 
