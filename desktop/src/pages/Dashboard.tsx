@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { HardDrive, Image, BarChart2 } from 'lucide-react'
+import { HardDrive, Image, Cloud, BarChart2 } from 'lucide-react'
 import { ClutterScoreRing } from '../components/ClutterScoreRing'
 import { api, WeeklySnapshot } from '../lib/api'
 
@@ -18,11 +18,11 @@ export function Dashboard() {
   const score = snapshot?.composite_score ?? 0
 
   return (
-    <div className="p-8 max-w-4xl mx-auto space-y-10">
+    <div className="p-8 max-w-5xl mx-auto space-y-10">
       <div>
         <h1 className="font-serif text-3xl" style={{ color: '#F2F2F3' }}>Declutter AI</h1>
         <p className="font-mono text-sm mt-1" style={{ color: '#8A8A96' }}>
-          Privacy-first digital cleanup
+          Privacy-first digital cleanup — Local & Cloud Storage
         </p>
         {!backendUp && (
           <p className="font-mono text-xs mt-2" style={{ color: '#FF4D4D' }}>
@@ -47,11 +47,12 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { icon: HardDrive, label: 'Storage',  desc: 'Find duplicates, large & old files', path: '/storage', color: '#7B61FF' },
-          { icon: Image,     label: 'Photos',   desc: 'Pick your top 10 aesthetic photos', path: '/photos',  color: '#22C55E' },
-          { icon: BarChart2, label: 'Report',   desc: 'Weekly clutter score trend',        path: '/report',  color: '#F59E0B' },
+          { icon: HardDrive, label: 'Local Storage', desc: 'Duplicates, large & old local files', path: '/storage', color: '#7B61FF' },
+          { icon: Cloud,     label: 'Google Drive', desc: 'Scan, organize & clean cloud storage', path: '/gdrive', color: '#38BDF8' },
+          { icon: Image,     label: 'Photo Picker', desc: 'Pick top 10 aesthetic photos', path: '/photos',  color: '#22C55E' },
+          { icon: BarChart2, label: 'Weekly Report', desc: 'Clutter score trends & analytics', path: '/report',  color: '#F59E0B' },
         ].map(({ icon: Icon, label, desc, path, color }) => (
           <button
             key={path}

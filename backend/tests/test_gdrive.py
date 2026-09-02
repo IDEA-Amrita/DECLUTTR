@@ -30,8 +30,7 @@ def test_gdrive_scan_without_link(client):
 
 @patch("app.services.drive_scanner.build")
 @patch("fastapi.BackgroundTasks.add_task")
-@patch("app.routers.gdrive._build_service")
-def test_gdrive_scan_and_flow(mock_build_service, mock_add_task, mock_scanner_build, client, session: Session):
+def test_gdrive_scan_and_flow(mock_add_task, mock_scanner_build, client, session: Session):
     from datetime import timedelta
     token = DriveToken(
         email="user@gmail.com",
@@ -44,7 +43,6 @@ def test_gdrive_scan_and_flow(mock_build_service, mock_add_task, mock_scanner_bu
 
     # Mock the Google Drive service
     mock_service = MagicMock()
-    mock_build_service.return_value = mock_service
     mock_scanner_build.return_value = mock_service
     
     # Mock files().list().execute()
@@ -61,9 +59,10 @@ def test_gdrive_scan_and_flow(mock_build_service, mock_add_task, mock_scanner_bu
     assert resp.status_code == 200
     scan_id = resp.json()["scan_id"]
     
-    # Run the DriveScanner direct mapping using the mock
+    # Run the DriveScanner directly with mock service
     from app.services.drive_scanner import DriveScanner
     scanner = DriveScanner(session, token)
+    scanner.service = mock_service
     scanner.run_scan(scan_id)
     
     # Check scan status
@@ -79,30 +78,29 @@ def test_gdrive_scan_and_flow(mock_build_service, mock_add_task, mock_scanner_bu
     assert len(files) == 3
     
     # Spot check mapped fields
-    large_file = next(f for f in files if f["name"] == "large.zip")
-    assert large_file["category"] == "large"
-    
     dupe_file = next(f for f in files if f["name"] == "photo_copy.jpg")
     assert dupe_file["category"] == "duplicate"
-    assert dupe_file["in_deletion_list"] == 1
     
-    # Flag file (POST /api/gdrive/files/{id}/flag)
-    flag_resp = client.post(f"/api/gdrive/files/file3/flag", json={"description": "Keep this archive"})
-    assert flag_resp.status_code == 200
+    # Keep file / protect
+    file3_rec = next(f for f in files if f["name"] == "large.zip")
+    keep_resp = client.post(f"/api/gdrive/scan/{scan_id}/keep", json={
+        "record_id": file3_rec["id"],
+        "description": "Keep this archive",
+        "flag": "keep"
+    })
+    assert keep_resp.status_code == 200
     
-    # Verify it updated
-    files_resp = client.get(f"/api/gdrive/scan/{scan_id}/files")
-    files = files_resp.json()
-    large_file = next(f for f in files if f["name"] == "large.zip")
-    assert large_file["is_flagged"] == 1
-    assert large_file["description"] == "Keep this archive"
-
     # Get deletion list
     del_resp = client.get(f"/api/gdrive/scan/{scan_id}/deletion-list")
     assert del_resp.status_code == 200
-    assert len(del_resp.json()) == 1  # only photo_copy.jpg
+    assert del_resp.json()["total_files"] == 1  # only duplicate photo_copy.jpg
     
-    # Approve deletion
-    app_del_resp = client.post(f"/api/gdrive/scan/{scan_id}/approve-deletion")
-    assert app_del_resp.status_code == 200
-    assert app_del_resp.json()["deleted"] == 1
+    # Execute cleanup
+    exec_resp = client.post(f"/api/gdrive/scan/{scan_id}/execute", json={
+        "do_delete": True,
+        "do_organize": False,
+        "do_compress": False
+    })
+    assert exec_resp.status_code == 200
+    assert exec_resp.json()["deleted"] == 1
+

@@ -10,7 +10,7 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from app.database import engine
+import app.database as db_module
 from app.models.gdrive_schemas import (
     DriveToken, DriveScanJob, DriveFileRecord, CompressionTask,
     DriveKeepRequest, DriveOrganiseRequest, DriveDeletionToggleRequest, DriveExecuteRequest,
@@ -37,8 +37,9 @@ _flow_store: Dict[str, Flow] = {}
 # DB session dependency — a real SQLModel Session so .exec() works
 # ---------------------------------------------------------------------------
 def get_db():
-    with Session(engine) as session:
+    with Session(db_module.engine) as session:
         yield session
+
 
 
 def _build_flow() -> Flow:
@@ -147,10 +148,11 @@ def start_scan(background_tasks: BackgroundTasks,
     db.refresh(job)
 
     def _run(scan_id: str, token_id: int):
-        with Session(engine) as s:
+        with Session(db_module.engine) as s:
             from app.services.drive_scanner import DriveScanner
             tok = s.get(DriveToken, token_id)
             DriveScanner(s, tok).run_scan(scan_id)
+
 
     background_tasks.add_task(_run, job.id, token.id)
     return {"scan_id": job.id}
